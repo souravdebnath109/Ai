@@ -3,8 +3,8 @@ import sys
 import random
 import math
 from collections import deque
-from dataclasses import dataclass
 
+# --- Constants ---
 SCREEN_W, SCREEN_H = 1000, 700
 FPS = 60
 LANES = 5
@@ -17,18 +17,18 @@ BUS_H = 60
 OBSTACLE_SPAWN_INTERVAL = 2.5
 PEDESTRIAN_SPAWN_INTERVAL = 3.5
 FINISH_DIST = 2000.0
-OPPONENT_IMPORTANCE = 250  # Can tweak
 
 def fuzzy_outside(self_x):
     left_dist = (self_x - ROAD_X)
     right_dist = (ROAD_X + ROAD_W - self_x)
-    # Returns a vague degree of being near edge
     return max(min(left_dist / 60.0, 1.0), min(right_dist / 60.0, 1.0))
 
 class Bus:
     def __init__(self, lane_idx, color, name, agent_cls):
         self.x = ROAD_X + lane_idx * LANE_W + (LANE_W - BUS_W) / 2
-        self.y = SCREEN_H - 180
+        # give a small random vertical offset so the two buses don't remain
+        # exactly on the same horizontal line which can create decision tie issues
+        self.y = SCREEN_H - 180 + random.uniform(-18.0, 18.0)
         self.w = BUS_W
         self.h = BUS_H
         self.color = color
@@ -54,20 +54,27 @@ class Bus:
         self.time_alive += dt
         if self.time_alive >= 1.0:
             self.score += 10
+            self.life = min(100.0, self.life + 2)
             self.time_alive = 0
         controls = self.agent.decide(world, opponent)
-        if controls.get("accel"): self.speed += self.accel * dt
-        elif controls.get("brake"): self.speed -= self.brake_power * dt
-        else: self.speed -= 5.0 * dt
-        if controls.get("left"): self.x -= self.lat_speed
-        if controls.get("right"): self.x += self.lat_speed
+        if controls.get("accel"):
+            self.speed += self.accel * dt
+        elif controls.get("brake"):
+            self.speed -= self.brake_power * dt
+        else:
+            self.speed -= 5.0 * dt
+        # Make lateral movement frame-rate independent
+        if controls.get("left"):
+            self.x -= self.lat_speed * dt * 60.0
+        if controls.get("right"):
+            self.x += self.lat_speed * dt * 60.0
         left_bound = ROAD_X + 6
         right_bound = ROAD_X + ROAD_W - self.w - 6
         if self.x < left_bound or self.x > right_bound:
             self.off_track = True
         self.x = max(left_bound, min(self.x, right_bound))
         self.y = max(100, min(self.y, SCREEN_H - 100))
-        self.speed = max(0, min(self.speed, self.max_speed))
+        self.speed = max(0.0, min(self.speed, self.max_speed))
         self.progress_m += self.speed * KMH_TO_MPS * dt
 
         dist_score = int(self.progress_m // 30)
@@ -75,7 +82,8 @@ class Bus:
             self.score += dist_score - self.last_progress_score
             self.last_progress_score = dist_score
 
-        if self.life <= 0:
+        self.life = max(0.0, self.life)
+        if self.life <= 0.0:
             self.dead = True
             self.speed = 0
             self.life = 0
@@ -90,23 +98,30 @@ class Bus:
         if bus:
             self.life -= 30
             self.score = max(0, self.score - 30)
-        if self.life < 0:
+        self.life = max(0.0, self.life)
+        if self.life <= 0.0:
             self.dead = True
             self.speed = 0
             self.life = 0
 
     def lane_index(self):
-        return int((self.x - ROAD_X) // LANE_W)
+        idx = int((self.x - ROAD_X) // LANE_W)
+        return max(0, min(idx, LANES - 1))
+
     def draw(self, surf):
         rect = pygame.Rect(int(self.x), int(self.y), self.w, self.h)
-        color = (100,100,100) if self.dead or self.off_track else self.color
+        color = (100, 100, 100) if self.dead or self.off_track else self.color
         pygame.draw.rect(surf, color, rect, border_radius=6)
-        pygame.draw.rect(surf, (220, 240, 255),
-            (rect.x + 8, rect.y + 8, rect.w - 16, int(rect.h / 2)),
-            border_radius=3)
-        font = pygame.font.SysFont("arial", 18)
-        lbl = font.render(self.name, True, (255,255,255))
+        pygame.draw.rect(surf, (220, 240, 255), (rect.x + 8, rect.y + 8, rect.w - 16, int(rect.h / 2)), border_radius=3)
+        # label rendering: prefer passing a pre-created font from Game to avoid
+        # allocating a new font object every frame. If not provided, fall back.
+        font = getattr(self, "_label_font", None)
+        if font is None:
+            # lazy fallback (rare) — still compatible
+            font = pygame.font.SysFont("arial", 18)
+        lbl = font.render(self.name, True, (255, 255, 255))
         surf.blit(lbl, (rect.centerx - lbl.get_width() // 2, rect.y - 18))
+
     def rect(self):
         return pygame.Rect(int(self.x), int(self.y), self.w, self.h)
 
@@ -117,11 +132,11 @@ class Obstacle:
         self.w = 40
         self.h = 40
 
-
     def update(self, scroll_speed, dt):
         self.y += scroll_speed * dt * 0.3
+
     def draw(self, surf):
-        pygame.draw.rect(surf, (120,80,20), pygame.Rect(int(self.x), int(self.y), self.w, self.h))
+        pygame.draw.rect(surf, (120, 80, 20), pygame.Rect(int(self.x), int(self.y), self.w, self.h))
 
 class Pedestrian:
     def __init__(self, lane_idx, y=-60):
@@ -135,10 +150,10 @@ class Pedestrian:
     def update(self, dt, scroll_speed):
         self.x += self.vx * dt * 50
         self.y += self.vy * dt * 50 + scroll_speed * dt
+
     def draw(self, surf):
         pygame.draw.rect(surf, (0, 200, 0), pygame.Rect(int(self.x), int(self.y), self.w, self.h))
 
-# BFS/DFS for lane-finding
 def bfs_lane(safe_lanes, cur):
     queue = deque([(cur, [])])
     visited = set([cur])
@@ -160,7 +175,8 @@ def dfs_lane(safe_lanes, cur, max_depth=2):
         lane, path = stack.pop()
         if lane in safe_lanes:
             return path
-        if len(path) > max_depth: continue
+        if len(path) > max_depth:
+            continue
         for shift in [-1, 1]:
             next_lane = lane + shift
             if 0 <= next_lane < LANES and next_lane not in visited:
@@ -168,7 +184,6 @@ def dfs_lane(safe_lanes, cur, max_depth=2):
                 visited.add(next_lane)
     return []
 
-# Minimax & Alpha-Beta for adversarial bus moves
 def minimax_lane(bus, opponent, lane_hazards, depth=2, maximizing=True, alpha=-math.inf, beta=math.inf):
     if depth == 0 or bus.life <= 0 or opponent.life <= 0:
         my_reward = -sum([len(h) for h in lane_hazards])
@@ -176,10 +191,10 @@ def minimax_lane(bus, opponent, lane_hazards, depth=2, maximizing=True, alpha=-m
     possible = []
     for shift in [-1, 0, 1]:
         l = bus.lane_index() + shift
-        if l < 0 or l >= LANES: continue
+        if l < 0 or l >= LANES:
+            continue
         reward = -len(lane_hazards[l])
         possible.append((reward, l))
-    best_lane = bus.lane_index()
     if maximizing:
         max_eval = -math.inf
         for _, l in possible:
@@ -212,38 +227,31 @@ class HybridAIBus:
         lane_hazards = [[] for _ in range(LANES)]
         for obj in world["obstacles"] + world["pedestrians"]:
             lane = int((obj.x - ROAD_X) // LANE_W)
-            if 0 <= lane < LANES:
-                dy = my_y - obj.y
-                if 0 < dy < LOOKAHEAD:
-                    lane_hazards[lane].append((dy, obj))
+            lane = max(0, min(lane, LANES - 1))
+            dy = my_y - obj.y
+            if 0 < dy < LOOKAHEAD:
+                lane_hazards[lane].append((dy, obj))
         safe_lanes = [l for l in range(LANES) if all(dy > SAFE_DIST for dy, _ in lane_hazards[l])]
-        # Use BFS for default safe pathfinding
-        path = bfs_lane(safe_lanes, current_lane)
-        # If opponent is close, use Minimax/Alpha-beta
-        adversarial = False
+        path = bfs_lane(safe_lanes, current_lane) if safe_lanes else []
         if opponent and not opponent.dead and abs(my_y - opponent.y) < 300:
-            adversarial = True
-            # Strongly penalize shared lanes (Alpha-Beta Pruning branch cut)
-            minmax_score = minimax_lane(self.bus, opponent, lane_hazards, depth=2)
-            # Optionally, avoid lane if opponent in same lane and close
             for i in range(LANES):
                 if opponent.lane_index() == i and abs(my_y - opponent.y) < SAFE_DIST * 1.5:
-                    # Remove i from safe_lanes if possible
                     if i in safe_lanes and len(safe_lanes) > 1:
                         safe_lanes.remove(i)
-            # Try DFS for riskier shortcut if blocked
             if not path and safe_lanes:
                 path = dfs_lane(safe_lanes, current_lane, max_depth=2)
-        # Path following
+        next_lane = current_lane
         if path:
-            next_lane = path[0] if path else current_lane
-            if next_lane < current_lane: controls["left"] = True
-            elif next_lane > current_lane: controls["right"] = True
-        # Fuzzy logic for edge/brake blend
+            next_lane = path[0]
+        elif safe_lanes:
+            next_lane = safe_lanes[0]
+        if next_lane < current_lane:
+            controls["left"] = True
+        elif next_lane > current_lane:
+            controls["right"] = True
         edge_val = fuzzy_outside(self.bus.x)
         if edge_val > 0.80:
             controls["brake"] = True
-        # Accelerate if path is really clear ahead
         if not any(lane_hazards[current_lane]) or min([dy for dy, _ in lane_hazards[current_lane]], default=999) > SAFE_DIST * 2:
             controls["accel"] = True
         else:
@@ -251,9 +259,26 @@ class HybridAIBus:
         return controls
 
 def clean_bus_collision(b1, b2):
-    if b1.lane_index() == b2.lane_index() and abs(b1.y - b2.y) < 60:
+    # Handle bus-to-bus collisions without instantly ending the race.
+    # Collisions should only reduce life/score and nudge the buses so they
+    # continue racing. If life reaches zero as a result, normal death logic
+    # in Bus.crash will mark the bus dead.
+    if b1.lane_index() == b2.lane_index() and abs(b1.y - b2.y) < BUS_H:
+        # Apply collision damage
         b1.crash(bus=True)
         b2.crash(bus=True)
+        # Nudge buses apart to avoid repeated immediate collisions.
+        overlap = BUS_H - abs(b1.y - b2.y)
+        if overlap > 0:
+            # shift them by at least a few pixels (integer)
+            shift = max(4, int(overlap // 2))
+            b1.y += shift
+            b2.y -= shift
+        # Apply a small speed penalty but don't stop them completely unless dead.
+        if not b1.dead:
+            b1.speed = max(0.0, b1.speed - 10.0)
+        if not b2.dead:
+            b2.speed = max(0.0, b2.speed - 10.0)
 
 class Game:
     def __init__(self):
@@ -284,7 +309,7 @@ class Game:
         pygame.draw.rect(self.screen, (50,50,50), (ROAD_X,0,ROAD_W,SCREEN_H))
         for i in range(1, LANES):
             lx = ROAD_X + i * LANE_W
-            for y in range(0,SCREEN_H,40):
+            for y in range(0, SCREEN_H, 40):
                 pygame.draw.rect(self.screen, (230,230,230), (lx-2, y+10, 4, 20))
     def update(self, dt):
         self.time += dt
@@ -302,21 +327,22 @@ class Game:
         scroll_speed = avg_speed * KMH_TO_MPS * 20 * dt
         for o in self.obstacles: o.update(scroll_speed, 1)
         for p in self.peds: p.update(dt, scroll_speed)
+        obstacles_to_remove = set()
+        peds_to_remove = set()
         for b in self.buses:
-            if b.dead or b.off_track: continue
-            crashed_obstacle = False
-            crashed_pedestrian = False
+            if b.dead or b.off_track:
+                continue
             for o in self.obstacles:
                 if b.rect().colliderect(pygame.Rect(o.x, o.y, o.w, o.h)):
-                    if not crashed_obstacle:
-                        b.crash(obstacle=True)
-                        crashed_obstacle = True
+                    b.crash(obstacle=True)
+                    obstacles_to_remove.add(o)
             for p in self.peds:
                 if b.rect().colliderect(pygame.Rect(p.x, p.y, p.w, p.h)):
-                    if not crashed_pedestrian:
-                        b.crash(pedestrian=True)
-                        crashed_pedestrian = True
-        if not self.buses[0].dead and not self.buses[0].off_track and not self.buses[1].dead and not self.buses[1].off_track:
+                    b.crash(pedestrian=True)
+                    peds_to_remove.add(p)
+        self.obstacles = [o for o in self.obstacles if o not in obstacles_to_remove and o.y < SCREEN_H + 100]
+        self.peds = [p for p in self.peds if p not in peds_to_remove and p.y < SCREEN_H + 100]
+        if not any(b.dead or b.off_track for b in self.buses):
             clean_bus_collision(self.buses[0], self.buses[1])
         for b in self.buses:
             if b.progress_m >= FINISH_DIST and not self.winner and not b.dead and not b.off_track:
@@ -327,14 +353,19 @@ class Game:
                 self.winner = self.buses[1 - self.buses.index(pushed[0])].name
         if not self.winner:
             alive = [b for b in self.buses if not b.dead and not b.off_track]
-            if len(alive) == 1: self.winner = alive[0].name
-            elif len(alive) == 0: self.winner = "Nobody"
+            if len(alive) == 1:
+                self.winner = alive[0].name
+            elif len(alive) == 0:
+                self.winner = "Nobody"
     def draw(self):
         self.screen.fill((32,128,76))
         self.draw_road()
-        for o in self.obstacles: o.draw(self.screen)
-        for p in self.peds: p.draw(self.screen)
-        for b in self.buses: b.draw(self.screen)
+        for o in self.obstacles:
+            o.draw(self.screen)
+        for p in self.peds:
+            p.draw(self.screen)
+        for b in self.buses:
+            b.draw(self.screen)
         hud_panel = pygame.Surface((SCREEN_W, 80)); hud_panel.set_alpha(220)
         hud_panel.fill((40,57,75)); self.screen.blit(hud_panel, (0,0))
         font_big = pygame.font.SysFont("arial", 28)
@@ -380,9 +411,9 @@ class Game:
         rules_font = pygame.font.SysFont("arial", 22)
         rules = [
             "Hybrid AI: BFS/DFS for paths, Minimax/Alpha-Beta for opponent, Fuzzy logic for edges.",
-            "Obstacles = -10% life, Pedestrians = -25%, Bus collision = -30%",
-            "Score rises for survival/travel, bus collision just loses life/score.",
-            "Press 'R' to reset game."
+            "Obstacles = -10% life, Pedestrians = -25%, Bus collision = -30%.",
+            "Collisions do not end game unless life reaches zero.",
+            "Score rises for survival/travel. Press 'R' to reset game."
         ]
         self.screen.blit(msg, (SCREEN_W//2 - msg.get_width()//2, SCREEN_H//3))
         self.screen.blit(start, (SCREEN_W//2 - start.get_width()//2, SCREEN_H//3 + 80))
@@ -392,8 +423,11 @@ class Game:
         pygame.display.flip()
         while True:
             for e in pygame.event.get():
-                if e.type == pygame.QUIT: pygame.quit(); sys.exit()
-                if e.type == pygame.KEYDOWN and e.key == pygame.K_RETURN: return
+                if e.type == pygame.QUIT:
+                    pygame.quit()
+                    sys.exit()
+                if e.type == pygame.KEYDOWN and e.key == pygame.K_RETURN:
+                    return
     def run(self):
         self.start_screen()
         while self.running:
@@ -406,5 +440,6 @@ class Game:
             if not self.winner: self.update(dt)
             self.draw()
         pygame.quit(); sys.exit()
+
 if __name__ == "__main__":
     Game().run()
